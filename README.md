@@ -67,7 +67,7 @@ print(f"Posterior cut : {model.probability_cut_:.4f}")
 | Parameter | Default | Description |
 |---|---|---|
 | `n_epochs` | `1000` | Maximum EM iterations |
-| 'n_sims' | '100' | Maximum Monte Carlo Simulation of Ripley's K |
+| `n_sims` | `100` | Maximum Monte Carlo Simulation of Ripley's K |
 | `stable_percentage` | `0.1` | Stop after `n_epochs × stable_percentage` non-improving steps |
 | `padding` | `0.1` | Fractional padding added to feature normalization bounds |
 | `random_state` | `None` | Integer seed for reproducibility |
