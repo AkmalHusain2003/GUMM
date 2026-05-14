@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+setup.py
+gumm/__init__.py
+gumm/_model.c
+gumm/_normalize.c
+gumm/_spatial.c
+gumm.egg-info/PKG-INFO
+gumm.egg-info/SOURCES.txt
+gumm.egg-info/dependency_links.txt
+gumm.egg-info/not-zip-safe
+gumm.egg-info/requires.txt
+gumm.egg-info/top_level.txt
