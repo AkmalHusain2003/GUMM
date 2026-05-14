@@ -68,6 +68,8 @@ class GUMM:
     ----------
     n_epochs : int
         Maximum EM iterations.
+    n_sims : int
+        Number of simulations for the spatial threshold refinement.
     stable_percentage : float
         Stop when the likelihood has not improved for
         ``stable_percentage * n_epochs`` consecutive steps.
@@ -79,11 +81,13 @@ class GUMM:
     def __init__(
         self,
         n_epochs          = 1000,
+        n_sims            = 100,
         stable_percentage = 0.1,
         padding           = 0.1,
         random_state      = None,
     ):
         self.n_epochs          = int(n_epochs)
+        self.n_sims            = int(n_sims)
         self.stable_percentage = float(stable_percentage)
         self.padding           = float(padding)
 
@@ -175,6 +179,7 @@ class GUMM:
                 probs,
                 edge_correction='isotropic',
                 confidence_level=0.99,
+                nsim=self.n_sims,
             )
 
             if ripley_cut is not None and len(diagnostics['thresholds']) > 0:

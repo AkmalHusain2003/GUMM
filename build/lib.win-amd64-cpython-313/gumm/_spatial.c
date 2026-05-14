@@ -20219,7 +20219,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
  *     object points,
  *     object probabilities,
  *     radii              = None,             # <<<<<<<<<<<<<<
- *     int    nsim        = 1000,
+ *     int    nsim        = 100,
  *     int    min_points  = 30,
 */
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
@@ -20266,7 +20266,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
     if (values[3]) {
       __pyx_v_nsim = __Pyx_PyLong_As_int(values[3]); if (unlikely((__pyx_v_nsim == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 145, __pyx_L3_error)
     } else {
-      __pyx_v_nsim = ((int)((int)0x3E8));
+      __pyx_v_nsim = ((int)((int)0x64));
     }
     if (values[4]) {
       __pyx_v_min_points = __Pyx_PyLong_As_int(values[4]); if (unlikely((__pyx_v_min_points == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 146, __pyx_L3_error)
@@ -24427,16 +24427,16 @@ __Pyx_RefNannySetupContext("PyInit__spatial", 0);
   /* "gumm/_spatial.pyx":145
  *     object probabilities,
  *     radii              = None,
- *     int    nsim        = 1000,             # <<<<<<<<<<<<<<
+ *     int    nsim        = 100,             # <<<<<<<<<<<<<<
  *     int    min_points  = 30,
  *     str    edge_correction  = 'isotropic',
 */
-  __pyx_t_4 = __Pyx_PyLong_From_int(((int)0x3E8)); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 145, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyLong_From_int(((int)0x64)); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 145, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
 
   /* "gumm/_spatial.pyx":146
  *     radii              = None,
- *     int    nsim        = 1000,
+ *     int    nsim        = 100,
  *     int    min_points  = 30,             # <<<<<<<<<<<<<<
  *     str    edge_correction  = 'isotropic',
  *     double confidence_level = 0.99,

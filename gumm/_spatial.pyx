@@ -142,7 +142,7 @@ def robust_adaptive_ripley_k(
     object points,
     object probabilities,
     radii              = None,
-    int    nsim        = 1000,
+    int    nsim        = 100,
     int    min_points  = 30,
     str    edge_correction  = 'isotropic',
     double confidence_level = 0.99,
