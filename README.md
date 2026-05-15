@@ -56,11 +56,11 @@ model  = GUMM(n_components=2, n_epochs=500, random_state=42)
 labels = model.fit_predict(X)
 # labels: 0 = background, 1 = component 1, 2 = component 2
 
-# Probabilities for new data
-proba = model.predict_proba(X_new)   # shape (n, 3)  — [uniform, c1, c2]
+# Extract Probabilities
+proba = model.predict_proba(X)   # shape (n, 3)  — [uniform, c1, c2]
 
-# Per-sample log-likelihood
-log_p = model.score_samples(X_new)  # shape (n,)
+# Extract Per-sample log-likelihood
+log_p = model.score_samples(X)  # shape (n,)
 ```
 
 ---
