@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: gumm
-Version: 0.2.0
-Summary: Gaussian Uniform Mixture Model with spatial awareness
+Version: 0.3.0
+Summary: Gaussian Uniform Mixture Model with spatial awareness and OpenMP parallelisation
 License: MIT
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
@@ -16,6 +16,13 @@ Requires-Dist: cython>=3.0; extra == "dev"
 
 **Gaussian Uniform Mixture Model** — an unsupervised membership classifier that separates K structured cluster components from a uniform background via Expectation-Maximization, with an automatic threshold driven by spatial point-pattern analysis.
 
+Computationally expensive regions are parallelised with **OpenMP**:
+
+| Region | Parallelised over | Schedule |
+|---|---|---|
+| Monte Carlo Ripley K simulations (`_spatial`) | `max_nsim` independent CSR replicates | `dynamic` |
+| Weighted covariance M-step (`_model`) | Feature dimensions (output matrix rows) | `static` |
+
 ---
 
 ## Algorithm
@@ -25,20 +32,20 @@ The model fits a mixture of K Gaussians plus one uniform background:
 $$p(\mathbf{x}) = \pi_U \cdot \mathcal{U}(\mathbf{x}) \;+\; \sum_{k=1}^{K} \pi_k \cdot \mathcal{N}(\mathbf{x};\,\boldsymbol{\mu}_k,\boldsymbol{\Sigma}_k)$$
 
 **E-step** — compute posterior responsibilities $\gamma_U^{(i)},\, \gamma_1^{(i)},\ldots,\gamma_K^{(i)}$ for each point.  
-**M-step** — update $(\pi_U, \pi_k, \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)$ via weighted MLE.
+**M-step** — update $(\pi_U, \pi_k, \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)$ via weighted MLE, with the covariance accumulation parallelised over feature rows.
 
-Once training converges, the membership threshold on the aggregate Gaussian posterior is set automatically by two methods applied in order:
+The membership threshold on the aggregate Gaussian posterior is set automatically:
 
 | Step | Method | Description |
 |---|---|---|
-| 1 | **Rotation elbow** | Rotates the posterior CDF curve; threshold = minimum curvature point + 0.05 |
-| 2 | **Ripley's K** | Monte Carlo supremum test on the 2-D spatial pattern (Ripley, 1976); if significant (p < 0.05), the final threshold is the 50/50 average with the elbow threshold |
+| 1 | **Rotation elbow** | Rotates the posterior CDF; threshold = minimum-curvature point + 0.05 |
+| 2 | **Ripley's K** | Parallelised Monte Carlo supremum test (Ripley 1976); if significant (p < 0.05), final threshold is the 50/50 average with the elbow threshold |
 
 ---
 
 ## Installation
 
-Requires a C compiler and Cython ≥ 3.0.
+Requires a C compiler, OpenMP, and Cython ≥ 3.0.
 
 ```bash
 pip install .
@@ -49,6 +56,14 @@ Development install:
 ```bash
 pip install -e ".[dev]"
 ```
+
+> **macOS note:** Apple Clang does not ship with OpenMP by default.
+> Install `libomp` via Homebrew and set the environment variables before building:
+> ```bash
+> brew install libomp
+> export CC=gcc-14   # or whichever gcc version brew installed
+> pip install .
+> ```
 
 ---
 
@@ -66,22 +81,19 @@ c2 = rng.multivariate_normal([8, 8], np.eye(2) * 0.3, 120)
 bg = rng.uniform(0, 10, (600, 2))
 X  = np.vstack([c1, c2, bg])
 
-model  = GUMM(n_components=2, n_epochs=500, random_state=42)
+model  = GUMM(n_components=2, n_epochs=500, n_threads=4, random_state=42)
 labels = model.fit_predict(X)
 # labels: 0 = background, 1 = component 1, 2 = component 2
 
-# Probabilities for new data
-proba = model.predict_proba(X_new)   # shape (n, 3)  — [uniform, c1, c2]
-
-# Per-sample log-likelihood
-log_p = model.score_samples(X_new)  # shape (n,)
+proba = model.predict_proba(X)   # (n, 3)  — [uniform, c1, c2]
+log_p = model.score_samples(X)   # (n,)    — log p(x)
 ```
 
 ---
 
 ## API
 
-### `GUMM(n_components, n_epochs, stable_percentage, padding, max_nsim, random_state)`
+### `GUMM(...)`
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -90,7 +102,8 @@ log_p = model.score_samples(X_new)  # shape (n,)
 | `stable_percentage` | `0.1` | Stop after `n_epochs × stable_percentage` non-improving steps |
 | `padding` | `0.1` | Fractional padding for feature normalisation bounds |
 | `max_nsim` | `100` | Monte Carlo replications in the Ripley's K spatial test |
-| `random_state` | `None` | Integer seed for reproducibility |
+| `n_threads` | `1` | OpenMP threads for covariance M-step and Ripley K MC loop; `-1` = all cores |
+| `random_state` | `None` | Integer seed |
 
 ### Methods
 
@@ -100,7 +113,7 @@ log_p = model.score_samples(X_new)  # shape (n,)
 | `predict(X)` | Integer cluster labels (0 = background, 1..K = clusters) |
 | `predict_proba(X)` | Responsibility matrix of shape `(n_samples, K+1)` |
 | `score_samples(X)` | Per-sample log-likelihood log p(x) |
-| `fit_predict(X)` | `fit(X)` + `predict(X)` in one call, reusing training responsibilities |
+| `fit_predict(X)` | `fit(X)` + labels in one call, reusing training responsibilities |
 
 ### Attributes after `fit()`
 
@@ -125,7 +138,7 @@ from gumm import normalize_features, robust_adaptive_ripley_k, rotate_and_find_e
 |---|---|
 | `normalize_features(X, padding)` | Robust [0, 1] normalisation via percentile bounds |
 | `rotate_and_find_elbow(data)` | Elbow detection via chord rotation |
-| `robust_adaptive_ripley_k(points, probs, ..., max_nsim, ...)` | Adaptive Ripley's K with CSR envelope |
+| `robust_adaptive_ripley_k(points, probs, max_nsim, n_threads, ...)` | Adaptive Ripley's K with parallelised CSR envelope |
 
 ---
 
