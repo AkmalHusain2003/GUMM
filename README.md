@@ -37,6 +37,13 @@ Requires a C compiler, OpenMP, and Cython ≥ 3.0.
 pip install .
 ```
 
+or
+
+```bash
+conda install -c conda-forge git
+pip install git+https://github.com/AkmalHusain2003/GUMM.git
+```
+
 Development install:
 
 ```bash
