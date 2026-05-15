@@ -11,25 +11,27 @@ cnp.import_array()
 
 
 # ---------------------------------------------------------------------------
-# Module-level C function — typed memoryviews live safely here
+# Module-level C function
+# Typed memoryview locals are only valid at module scope in Cython — not
+# inside Python-class def methods.
 # ---------------------------------------------------------------------------
 
 cdef cnp.ndarray _weighted_cov(
     double[:, :] X,
-    double[:]    gamma_g,
+    double[:]    gamma_k,
     double[:]    mu,
     double       N_k,
 ):
     """
-    Weighted sample covariance via a pure C triple-loop.
+    Weighted sample covariance matrix via a pure C triple-loop.
 
-    Cython eliminates all bounds checks and Python overhead for
-    the innermost features × features accumulation.
+    Computes  Sigma = (1/N_k) * sum_i gamma_k[i] * (x_i - mu)(x_i - mu)^T
+    with all bounds checks disabled for maximum throughput.
     """
     cdef:
         int    n_samples  = X.shape[0]
         int    n_features = X.shape[1]
-        int    j, k, l
+        int    j, p, q
         double gj
 
     cdef cnp.ndarray cov_out  = np.zeros((n_features, n_features), dtype=np.float64)
@@ -39,16 +41,16 @@ cdef cnp.ndarray _weighted_cov(
     cdef double[:]    diff_j = diff_buf
 
     for j in range(n_samples):
-        gj = gamma_g[j]
-        for k in range(n_features):
-            diff_j[k] = X[j, k] - mu[k]
-        for k in range(n_features):
-            for l in range(n_features):
-                cov[k, l] += gj * diff_j[k] * diff_j[l]
+        gj = gamma_k[j]
+        for p in range(n_features):
+            diff_j[p] = X[j, p] - mu[p]
+        for p in range(n_features):
+            for q in range(n_features):
+                cov[p, q] += gj * diff_j[p] * diff_j[q]
 
-    for k in range(n_features):
-        for l in range(n_features):
-            cov[k, l] /= N_k
+    for p in range(n_features):
+        for q in range(n_features):
+            cov[p, q] /= N_k
 
     return cov_out
 
@@ -61,110 +63,209 @@ class GUMM:
     """
     Gaussian Uniform Mixture Model (GUMM).
 
-    Fits a two-component mixture (multivariate Gaussian + uniform) via EM
-    and assigns binary membership using an automatic probability threshold.
+    Models data as K Gaussian cluster components embedded in a uniform
+    background noise component:
+
+        p(x) = pi_u * U(x) + sum_{k=1}^{K} pi_k * N(x; mu_k, Sigma_k)
+
+    Parameters are estimated via Expectation-Maximization.  After fitting,
+    points whose aggregate Gaussian posterior exceeds an automatically
+    determined threshold are assigned to their most likely Gaussian
+    component; remaining points are labelled 0 (background).
 
     Parameters
     ----------
+    n_components : int
+        Number of Gaussian cluster components K.
     n_epochs : int
         Maximum EM iterations.
-    n_sims : int
-        Number of simulations for the spatial threshold refinement.
     stable_percentage : float
-        Stop when the likelihood has not improved for
-        ``stable_percentage * n_epochs`` consecutive steps.
+        Convergence criterion: training stops when the log-likelihood has not
+        improved for ``stable_percentage * n_epochs`` consecutive steps.
     padding : float
         Fractional padding for feature normalisation bounds.
+    max_nsim : int
+        Monte Carlo replications used inside the Ripley's K spatial test
+        when computing the automatic probability threshold.
     random_state : int, optional
     """
 
     def __init__(
         self,
+        n_components      = 1,
         n_epochs          = 1000,
-        n_sims            = 100,
         stable_percentage = 0.1,
         padding           = 0.1,
+        max_nsim          = 100,
         random_state      = None,
     ):
+        self.n_components      = int(n_components)
         self.n_epochs          = int(n_epochs)
-        self.n_sims            = int(n_sims)
         self.stable_percentage = float(stable_percentage)
         self.padding           = float(padding)
+        self.max_nsim          = int(max_nsim)
 
         if random_state is not None:
             np.random.seed(int(random_state))
 
-        self.cluster_params   = None
-        self.probabilities_   = None
-        self.probability_cut_ = None
-        self.scaling_params_  = None
+        # Set by fit()
+        self.weights_         = None   # (K+1,)   [pi_u, pi_1 .. pi_K]
+        self.means_           = None   # (K, D)
+        self.covariances_     = None   # (K, D, D)
+        self.probabilities_   = None   # (N, K+1) training responsibilities
+        self.probability_cut_ = None   # scalar threshold on aggregate Gaussian posterior
+        self.scaling_params_  = None   # from normalize_features
 
     # ------------------------------------------------------------------
+    # Private — initialisation
+    # ------------------------------------------------------------------
 
-    def _initialize_cluster(self, n_dimensions):
-        n_dimensions = int(n_dimensions)
-        return {
-            'pi_u': 0.5,
-            'pi_g': 0.5,
-            'mu':   np.random.uniform(0.1, 0.9, n_dimensions),
-            'cov':  np.eye(n_dimensions) * np.random.uniform(0.1, 0.9, n_dimensions),
-        }
+    def _initialize_params(self, int n_dimensions):
+        """Randomly initialise mixture parameters for K components."""
+        cdef:
+            int    K          = self.n_components
+            double pi_k_init  = 0.5 / K   # K Gaussians share 50 %; uniform gets 50 %
 
-    def _expectation_step(self, X, cluster):
-        """E-step: compute posterior responsibilities. Returns False on numerical failure."""
+        components = [
+            {
+                'pi_k': pi_k_init,
+                'mu':   np.random.uniform(0.1, 0.9, n_dimensions),
+                'cov':  np.eye(n_dimensions) * np.random.uniform(0.1, 0.9, n_dimensions),
+            }
+            for _ in range(K)
+        ]
+        return {'pi_u': 0.5, 'components': components}
+
+    # ------------------------------------------------------------------
+    # Private — E-step
+    # ------------------------------------------------------------------
+
+    def _expectation_step(self, X, params):
+        """
+        E-step: compute the (N, K+1) responsibility matrix.
+
+        Column layout:
+            0     → gamma_u  (uniform background)
+            1..K  → gamma_k  (k-th Gaussian component)
+
+        Returns False on numerical failure (e.g. singular covariance).
+        """
+        cdef int k
+
         try:
-            gamma_g = cluster['pi_g'] * multivariate_normal(
-                mean=cluster['mu'],
-                cov=cluster['cov'],
-            ).pdf(X)
+            n = X.shape[0]
+            K = self.n_components
 
-            # Uniform density = 1 / volume of the feature-space bounding box
-            feature_range = X.max(axis=0) - X.min(axis=0)
-            gamma_u       = cluster['pi_u'] / np.prod(feature_range)
-            gammas_sum    = gamma_g + gamma_u
+            # Uniform density:  pi_u / vol(bounding_box)
+            # Computed from the normalised data so the bounding box ≈ [0,1]^D
+            # but we derive it exactly from the actual data range.
+            feature_range   = X.max(axis=0) - X.min(axis=0)
+            uniform_density = params['pi_u'] / np.prod(feature_range)
 
-            cluster['gamma_g']    = gamma_g / gammas_sum
-            cluster['gamma_u']    = gamma_u / gammas_sum
-            cluster['likelihood'] = float(np.sum(np.log(gammas_sum)))
+            # raw[:, 0]   = pi_u * U(x)            (same for all x)
+            # raw[:, k+1] = pi_k * N(x; mu_k, Sigma_k)
+            raw        = np.empty((n, K + 1), dtype=np.float64)
+            raw[:, 0]  = uniform_density
+
+            for k, comp in enumerate(params['components']):
+                raw[:, k + 1] = comp['pi_k'] * multivariate_normal(
+                    mean=comp['mu'],
+                    cov=comp['cov'],
+                ).pdf(X)
+
+            # p(x_i) = sum of all components
+            row_sums      = raw.sum(axis=1)                       # (N,)
+            log_likelihood = float(np.sum(np.log(row_sums)))
+
+            # Normalise rows → posterior responsibilities
+            gamma = raw / row_sums[:, np.newaxis]                 # (N, K+1)
+
+            params['gamma']      = gamma
+            params['likelihood'] = log_likelihood
             return True
+
         except np.linalg.LinAlgError:
             return False
 
-    def _maximization_step(self, X, cluster):
-        """M-step: update mixture parameters from responsibilities."""
-        gamma_g_arr = np.ascontiguousarray(cluster['gamma_g'], dtype=np.float64)
-        N_k         = float(gamma_g_arr.sum())
-        N           = float(X.shape[0])
+    # ------------------------------------------------------------------
+    # Private — M-step
+    # ------------------------------------------------------------------
 
-        mu_arr = (gamma_g_arr[:, np.newaxis] * X).sum(axis=0) / N_k
-
-        # _weighted_cov is a module-level cdef function — runs at C speed
-        cov_arr = _weighted_cov(
-            np.ascontiguousarray(X,      dtype=np.float64),
-            gamma_g_arr,
-            np.ascontiguousarray(mu_arr, dtype=np.float64),
-            N_k,
-        )
-
-        cluster.update({
-            'pi_u': float(np.sum(cluster['gamma_u'])) / N,
-            'pi_g': N_k / N,
-            'mu':   mu_arr,
-            'cov':  cov_arr,
-        })
-
-    def _find_probability_cut(self, probs, X, probability_cut):
+    def _maximization_step(self, X, params):
         """
-        Derive the membership probability threshold.
+        M-step: update pi_u, and for each Gaussian component (pi_k, mu_k, Sigma_k).
 
-        A float is treated as a quantile in [0, 1].
-        'auto' combines the rotation-elbow method with Ripley's K spatial
-        test when X has >= 2 features.
+        The uniform weight is updated as the mean responsibility of the
+        background column.  Each Gaussian's parameters are updated via
+        weighted MLE using the module-level C function _weighted_cov.
         """
-        if isinstance(probability_cut, (int, float)):
-            return float(np.percentile(probs, float(probability_cut) * 100.0))
+        cdef:
+            int    k
+            double N_k, N = float(X.shape[0])
 
-        # ---- rotation-elbow threshold ----
+        gamma = params['gamma']          # (N, K+1)
+
+        params['pi_u'] = float(gamma[:, 0].sum()) / N
+
+        for k, comp in enumerate(params['components']):
+            gamma_k_arr = np.ascontiguousarray(gamma[:, k + 1], dtype=np.float64)
+            N_k         = float(gamma_k_arr.sum())
+
+            if N_k < 1e-10:
+                # Component has collapsed — preserve current parameters
+                continue
+
+            mu_k = (gamma_k_arr[:, np.newaxis] * X).sum(axis=0) / N_k
+
+            cov_k = _weighted_cov(
+                np.ascontiguousarray(X,    dtype=np.float64),
+                gamma_k_arr,
+                np.ascontiguousarray(mu_k, dtype=np.float64),
+                N_k,
+            )
+
+            comp['pi_k'] = N_k / N
+            comp['mu']   = mu_k
+            comp['cov']  = cov_k
+
+    # ------------------------------------------------------------------
+    # Private — store sklearn-style public attributes
+    # ------------------------------------------------------------------
+
+    def _store_fitted_attributes(self, params):
+        """Copy fitted params into sklearn-style attributes."""
+        comps = params['components']
+
+        self.weights_ = np.array(
+            [params['pi_u']] + [c['pi_k'] for c in comps],
+            dtype=np.float64,
+        )   # (K+1,)  index 0 = uniform
+
+        self.means_ = np.array(
+            [c['mu'] for c in comps], dtype=np.float64
+        )   # (K, D)
+
+        self.covariances_ = np.array(
+            [c['cov'] for c in comps], dtype=np.float64
+        )   # (K, D, D)
+
+    # ------------------------------------------------------------------
+    # Private — threshold selection
+    # ------------------------------------------------------------------
+
+    def _find_probability_cut(self, total_gauss_prob, X_norm):
+        """
+        Find the threshold on the aggregate Gaussian posterior
+        ( = sum_k gamma_k  =  1 - gamma_u ).
+
+        Step 1 — rotation-elbow method on the posterior CDF.
+        Step 2 — Ripley's K spatial test (only when n_features >= 2);
+                 if the test is significant, the final threshold is the
+                 50/50 average of the spatial and elbow thresholds.
+        """
+        probs = total_gauss_prob   # (N,) values in [0, 1]
+
+        # ---- Step 1: rotation-elbow ----
         percentiles = np.arange(0.01, 0.99, 0.01)
         perc_probs  = np.column_stack([
             percentiles,
@@ -172,18 +273,18 @@ class GUMM:
         ])
         rot_cut = float(rotate_and_find_elbow(perc_probs))
 
-        # ---- spatial refinement (requires >= 2 features) ----
-        if X.shape[1] >= 2:
+        # ---- Step 2: Ripley's K spatial refinement ----
+        if X_norm.shape[1] >= 2:
             ripley_cut, diagnostics = robust_adaptive_ripley_k(
-                X[:, :2],
+                X_norm[:, :2],
                 probs,
+                max_nsim=self.max_nsim,
                 edge_correction='isotropic',
                 confidence_level=0.99,
-                nsim=self.n_sims,
             )
 
             if ripley_cut is not None and len(diagnostics['thresholds']) > 0:
-                # Locate the matching threshold safely via argmin (avoids float equality)
+                # Use argmin to avoid float equality comparison
                 thresholds_arr = np.array(diagnostics['thresholds'])
                 idx            = int(np.argmin(np.abs(thresholds_arr - ripley_cut)))
                 if diagnostics['p_values'][idx] < 0.05:
@@ -192,42 +293,117 @@ class GUMM:
         return rot_cut
 
     # ------------------------------------------------------------------
+    # Private — apply stored normalisation to new data
+    # ------------------------------------------------------------------
 
-    def fit_predict(self, X, probability_cut='auto'):
+    def _transform(self, X):
+        """Apply stored scaling_params_ to new data (no re-fitting)."""
+        X_arr      = np.ascontiguousarray(X, dtype=np.float64)
+        n_features = X_arr.shape[1]
+        X_norm     = np.empty_like(X_arr)
+
+        for i in range(n_features):
+            sp         = self.scaling_params_[i]
+            X_norm[:, i] = np.clip(
+                (X_arr[:, i] - sp['min']) / sp['range'], 0.0, 1.0
+            )
+        return X_norm
+
+    # ------------------------------------------------------------------
+    # Private — responsibilities for arbitrary (normalised) data
+    # ------------------------------------------------------------------
+
+    def _responsibilities(self, X_norm):
         """
-        Fit GUMM to *X* and return binary cluster membership.
+        Compute (N, K+1) responsibility matrix from stored fitted params.
+
+        Returns
+        -------
+        gamma    : ndarray (N, K+1)
+        row_sums : ndarray (N,)  — p(x) under the full mixture
+        """
+        cdef int k
+        n = X_norm.shape[0]
+        K = self.n_components
+
+        feature_range   = X_norm.max(axis=0) - X_norm.min(axis=0)
+        uniform_density = self.weights_[0] / np.prod(feature_range)
+
+        raw       = np.empty((n, K + 1), dtype=np.float64)
+        raw[:, 0] = uniform_density
+
+        for k in range(K):
+            raw[:, k + 1] = self.weights_[k + 1] * multivariate_normal(
+                mean=self.means_[k],
+                cov=self.covariances_[k],
+            ).pdf(X_norm)
+
+        row_sums = raw.sum(axis=1)
+        gamma    = raw / row_sums[:, np.newaxis]
+        return gamma, row_sums
+
+    # ------------------------------------------------------------------
+    # Private — shared label assignment logic
+    # ------------------------------------------------------------------
+
+    def _assign_labels(self, gamma):
+        """
+        Convert (N, K+1) responsibility matrix to integer cluster labels.
+
+        label = 0 : background (aggregate Gaussian posterior <= threshold)
+        label = k : member of Gaussian component k  (1-based, k = 1..K)
+        """
+        total_gauss = 1.0 - gamma[:, 0]          # (N,)
+        is_member   = total_gauss > self.probability_cut_
+
+        labels = np.zeros(gamma.shape[0], dtype=int)
+
+        if self.n_components == 1:
+            labels[is_member] = 1
+        else:
+            # Assign member points to the Gaussian with highest responsibility
+            gauss_gamma = gamma[:, 1:]                     # (N, K)
+            best_k      = np.argmax(gauss_gamma, axis=1)   # (N,) 0-based
+            labels[is_member] = best_k[is_member] + 1      # shift to 1-based
+
+        return labels
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def fit(self, X):
+        """
+        Fit GUMM to *X*.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-        probability_cut : 'auto' or float
-            'auto' selects the threshold automatically.
-            A float in [0, 1] is treated as a quantile of the posterior.
 
         Returns
         -------
-        membership : ndarray of shape (n_samples,), dtype int
-            1 = Gaussian cluster member, 0 = background.
+        self
         """
         cdef:
             double likelihood, likelihood_old = -1e308
             int    epoch, n_stable = 0, stable_limit
 
         X_arr = np.ascontiguousarray(X, dtype=np.float64)
-
         X_norm, self.scaling_params_ = normalize_features(X_arr, self.padding)
-        n_dimensions                 = X_norm.shape[1]
-        self.cluster_params          = self._initialize_cluster(n_dimensions)
-        stable_limit                 = int(self.stable_percentage * self.n_epochs)
+        n_dimensions = X_norm.shape[1]
+
+        params       = self._initialize_params(n_dimensions)
+        stable_limit = int(self.stable_percentage * self.n_epochs)
 
         with tqdm(total=self.n_epochs, desc="Training GUMM") as pbar:
             for epoch in range(self.n_epochs):
-                if not self._expectation_step(X_norm, self.cluster_params):
-                    self.cluster_params = self._initialize_cluster(n_dimensions)
+                if not self._expectation_step(X_norm, params):
+                    # Numerical failure — re-initialise and retry
+                    params = self._initialize_params(n_dimensions)
                     continue
 
-                self._maximization_step(X_norm, self.cluster_params)
-                likelihood = self.cluster_params['likelihood']
+                self._maximization_step(X_norm, params)
+                likelihood = params['likelihood']
 
                 if likelihood > likelihood_old:
                     likelihood_old = likelihood
@@ -242,9 +418,96 @@ class GUMM:
                     print(f"\nConverged at epoch {epoch + 1}")
                     break
 
-        self.probabilities_   = self.cluster_params['gamma_g']
-        self.probability_cut_ = self._find_probability_cut(
-            self.probabilities_, X_arr, probability_cut
-        )
+        self._store_fitted_attributes(params)
 
-        return (self.probabilities_ > self.probability_cut_).astype(int)
+        # Store full (N, K+1) training responsibilities
+        self.probabilities_ = params['gamma']
+
+        # Aggregate Gaussian posterior = 1 - gamma_u
+        total_gauss = 1.0 - self.probabilities_[:, 0]
+
+        self.probability_cut_ = self._find_probability_cut(total_gauss, X_norm)
+
+        return self
+
+    def predict_proba(self, X):
+        """
+        Posterior responsibility matrix for *X*.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        proba : ndarray of shape (n_samples, n_components + 1)
+            Column 0 = uniform background posterior.
+            Columns 1..K = per-Gaussian-component posteriors.
+            Each row sums to 1.
+        """
+        if self.weights_ is None:
+            raise RuntimeError("Call fit() before predict_proba().")
+
+        X_norm   = self._transform(X)
+        gamma, _ = self._responsibilities(X_norm)
+        return gamma
+
+    def score_samples(self, X):
+        """
+        Per-sample log-likelihood  log p(x)  under the fitted mixture.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        log_p : ndarray of shape (n_samples,)
+        """
+        if self.weights_ is None:
+            raise RuntimeError("Call fit() before score_samples().")
+
+        X_norm      = self._transform(X)
+        _, row_sums = self._responsibilities(X_norm)
+        return np.log(row_sums)
+
+    def predict(self, X):
+        """
+        Cluster label for each sample in *X*.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,), dtype int
+            0 = background.
+            k = Gaussian component k  (k = 1 .. n_components).
+        """
+        if self.weights_ is None:
+            raise RuntimeError("Call fit() before predict().")
+
+        gamma = self.predict_proba(X)
+        return self._assign_labels(gamma)
+
+    def fit_predict(self, X):
+        """
+        Fit GUMM to *X* and return cluster labels.
+
+        Equivalent to ``fit(X).predict(X)`` but reuses the training
+        responsibilities already computed during ``fit()``, avoiding a
+        redundant E-step.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,), dtype int
+            0 = background.
+            k = Gaussian component k  (k = 1 .. n_components).
+        """
+        self.fit(X)
+        return self._assign_labels(self.probabilities_)

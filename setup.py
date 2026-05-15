@@ -2,8 +2,6 @@ from setuptools import setup, Extension, find_packages
 from Cython.Build import cythonize
 import numpy as np
 
-# Compiler directives applied to all extensions.
-# These mirror the per-file headers but are enforced globally here as well.
 _DIRECTIVES = {
     'language_level': '3',
     'boundscheck':    False,
