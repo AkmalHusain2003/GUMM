@@ -2,7 +2,7 @@
 
 **Gaussian Uniform Mixture Model** — an unsupervised membership classifier that separates K structured cluster components from a uniform background via Expectation-Maximization, with an automatic threshold driven by spatial point-pattern analysis.
 
-Computationally expensive regions are parallelised with **OpenMP**:
+Computationally expensive regions are parallelized with **OpenMP**:
 
 | Region | Parallelised over | Schedule |
 |---|---|---|
@@ -18,14 +18,14 @@ The model fits a mixture of K Gaussians plus one uniform background:
 $$p(\mathbf{x}) = \pi_U \cdot \mathcal{U}(\mathbf{x}) \;+\; \sum_{k=1}^{K} \pi_k \cdot \mathcal{N}(\mathbf{x};\,\boldsymbol{\mu}_k,\boldsymbol{\Sigma}_k)$$
 
 **E-step** — compute posterior responsibilities $\gamma_U^{(i)},\, \gamma_1^{(i)},\ldots,\gamma_K^{(i)}$ for each point.  
-**M-step** — update $(\pi_U, \pi_k, \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)$ via weighted MLE, with the covariance accumulation parallelised over feature rows.
+**M-step** — update $(\pi_U, \pi_k, \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)$ via weighted MLE, with the covariance accumulation parallelized over feature rows.
 
 The membership threshold on the aggregate Gaussian posterior is set automatically:
 
 | Step | Method | Description |
 |---|---|---|
 | 1 | **Rotation elbow** | Rotates the posterior CDF; threshold = minimum-curvature point + 0.05 |
-| 2 | **Ripley's K** | Parallelised Monte Carlo supremum test (Ripley 1976); if significant (p < 0.05), final threshold is the 50/50 average with the elbow threshold |
+| 2 | **Ripley's K** | Parallelized Monte Carlo supremum test (Ripley 1976); if significant (p < 0.05), final threshold is the 50/50 average with the elbow threshold |
 
 ---
 
@@ -93,7 +93,7 @@ log_p = model.score_samples(X)   # (n,)    — log p(x)
 | `n_components` | `1` | Number of Gaussian cluster components K |
 | `n_epochs` | `1000` | Maximum EM iterations |
 | `stable_percentage` | `0.1` | Stop after `n_epochs × stable_percentage` non-improving steps |
-| `padding` | `0.1` | Fractional padding for feature normalisation bounds |
+| `padding` | `0.1` | Fractional padding for feature normalization bounds |
 | `max_nsim` | `100` | Monte Carlo replications in the Ripley's K spatial test |
 | `n_threads` | `1` | OpenMP threads for covariance M-step and Ripley K MC loop; `-1` = all cores |
 | `random_state` | `None` | Integer seed |
@@ -117,7 +117,7 @@ log_p = model.score_samples(X)   # (n,)    — log p(x)
 | `covariances_` | `(K, D, D)` | Gaussian covariance matrices |
 | `probabilities_` | `(N, K+1)` | Training responsibilities |
 | `probability_cut_` | scalar | Threshold on aggregate Gaussian posterior |
-| `scaling_params_` | dict | Per-feature normalisation bounds |
+| `scaling_params_` | dict | Per-feature normalization bounds |
 
 ---
 
@@ -129,9 +129,9 @@ from gumm import normalize_features, robust_adaptive_ripley_k, rotate_and_find_e
 
 | Function | Description |
 |---|---|
-| `normalize_features(X, padding)` | Robust [0, 1] normalisation via percentile bounds |
+| `normalize_features(X, padding)` | Robust [0, 1] normalization via percentile bounds |
 | `rotate_and_find_elbow(data)` | Elbow detection via chord rotation |
-| `robust_adaptive_ripley_k(points, probs, max_nsim, n_threads, ...)` | Adaptive Ripley's K with parallelised CSR envelope |
+| `robust_adaptive_ripley_k(points, probs, max_nsim, n_threads, ...)` | Adaptive Ripley's K with parallelized CSR envelope |
 
 ---
 
